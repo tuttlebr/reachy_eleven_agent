@@ -44,6 +44,7 @@ def run(
 
     logger = setup_logger(args.debug)
     logger.info("Starting Reachy Eleven Agent app with provider=%s", args.provider)
+    stop_event = app_stop_event or threading.Event()
 
     if args.no_camera and args.head_tracker is not None:
         logger.warning(
@@ -57,7 +58,10 @@ def run(
             if args.robot_name is not None:
                 robot_kwargs["robot_name"] = args.robot_name
 
-            logger.info("Initializing ReachyMini (SDK will auto-detect appropriate backend)")
+            if args.provider == "elevenlabs":
+                robot_kwargs["media_backend"] = os.getenv("REACHY_ELEVEN_MEDIA_BACKEND", "no_media")
+
+            logger.info("Initializing ReachyMini with options: %s", robot_kwargs)
             robot = ReachyMini(**robot_kwargs)
 
         except TimeoutError as e:
@@ -104,9 +108,14 @@ def run(
 
     camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
 
+    def stop_on_connection_lost(error: BaseException) -> None:
+        logger.error("Lost connection to Reachy Mini daemon; stopping app. Details: %s", error)
+        stop_event.set()
+
     movement_manager = MovementManager(
         current_robot=robot,
         camera_worker=camera_worker,
+        on_connection_lost=stop_on_connection_lost,
     )
 
     head_wobbler = HeadWobbler(set_speech_offsets=movement_manager.set_speech_offsets)
@@ -130,7 +139,7 @@ def run(
             vision_manager.start()
 
         try:
-            run_elevenlabs_agent(args, deps, stop_event=app_stop_event)
+            run_elevenlabs_agent(args, deps, stop_event=stop_event)
         finally:
             movement_manager.stop()
             head_wobbler.stop()
@@ -142,6 +151,11 @@ def run(
                 robot.media.close()
             except Exception as e:
                 logger.debug(f"Error closing media during shutdown: {e}")
+            try:
+                if getattr(robot, "_media_released", False):
+                    robot.client.acquire_media()
+            except Exception as e:
+                logger.debug(f"Error returning media to daemon during shutdown: {e}")
             robot.client.disconnect()
             time.sleep(1)
             logger.info("Shutdown complete.")

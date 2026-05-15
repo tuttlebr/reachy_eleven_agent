@@ -112,7 +112,7 @@ class ReachyMediaAudioInterface:
     ) -> None:
         """Initialize the Reachy media-backed audio adapter."""
         self._reachy_mini = reachy_mini
-        self._media = reachy_mini.media
+        self._audio = self._select_audio_backend(reachy_mini)
         self._head_wobbler = head_wobbler
         self._speech_motion_enabled = speech_motion_enabled
         self._input_callback: Callable[[bytes], None] | None = None
@@ -133,14 +133,14 @@ class ReachyMediaAudioInterface:
             self._stop_event.clear()
 
             try:
-                self._media.start_recording()
-                self._media.start_playing()
+                self._audio.start_recording()
+                self._audio.start_playing()
                 self._input_sample_rate = _valid_sample_rate(
-                    self._media.get_input_audio_samplerate(),
+                    self._audio.get_input_audio_samplerate(),
                     ELEVENLABS_PCM_SAMPLE_RATE,
                 )
                 self._output_sample_rate = _valid_sample_rate(
-                    self._media.get_output_audio_samplerate(),
+                    self._audio.get_output_audio_samplerate(),
                     ELEVENLABS_PCM_SAMPLE_RATE,
                 )
             except Exception as exc:
@@ -193,8 +193,9 @@ class ReachyMediaAudioInterface:
             input_sample_rate=ELEVENLABS_PCM_SAMPLE_RATE,
             output_sample_rate=self._output_sample_rate,
         )
+        audio_frame = _fit_output_channels(audio_frame, _get_output_channels(self._audio))
         try:
-            self._media.push_audio_sample(audio_frame)
+            self._audio.push_audio_sample(audio_frame)
         except Exception:
             logger.warning("Failed to play ElevenLabs audio through Reachy media", exc_info=True)
 
@@ -208,7 +209,7 @@ class ReachyMediaAudioInterface:
         """Read Reachy microphone samples and send ElevenLabs PCM chunks."""
         while not self._stop_event.is_set():
             try:
-                audio_frame = self._media.get_audio_sample()
+                audio_frame = self._audio.get_audio_sample()
             except Exception:
                 if not self._stop_event.is_set():
                     logger.warning("Failed to read Reachy microphone audio", exc_info=True)
@@ -241,25 +242,54 @@ class ReachyMediaAudioInterface:
 
     def _stop_media(self) -> None:
         try:
-            self._media.stop_recording()
+            self._audio.stop_recording()
         except Exception:
             logger.debug("Error stopping Reachy audio recording", exc_info=True)
 
         try:
-            self._media.stop_playing()
+            self._audio.stop_playing()
         except Exception:
             logger.debug("Error stopping Reachy audio playback", exc_info=True)
 
-    def _clear_media_output(self) -> None:
-        try:
-            from reachy_mini.media.media_manager import MediaBackend
+        cleanup = getattr(self._audio, "cleanup", None)
+        if callable(cleanup):
+            try:
+                cleanup()
+            except Exception:
+                logger.debug("Error cleaning up Reachy audio backend", exc_info=True)
 
-            if self._media.backend in {MediaBackend.GSTREAMER, MediaBackend.GSTREAMER_NO_VIDEO}:
-                self._media.audio.clear_player()
-            else:
-                self._media.audio.clear_output_buffer()
-        except Exception:
-            logger.debug("Could not clear Reachy audio output buffer", exc_info=True)
+    def _clear_media_output(self) -> None:
+        if hasattr(self._audio, "clear_output_buffer"):
+            try:
+                self._audio.clear_output_buffer()
+                return
+            except Exception:
+                logger.debug("Could not clear Reachy audio output buffer", exc_info=True)
+
+        media = self._reachy_mini.media
+        media_audio = getattr(media, "audio", None)
+        if media_audio is not None and hasattr(media_audio, "clear_output_buffer"):
+            try:
+                media_audio.clear_output_buffer()
+            except Exception:
+                logger.debug("Could not clear Reachy media output buffer", exc_info=True)
+
+    def _select_audio_backend(self, reachy_mini: ReachyMini) -> Any:
+        media = reachy_mini.media
+        media_audio = getattr(media, "audio", None)
+        if media_audio is not None and _has_audio_backend_methods(media_audio):
+            return media_audio
+
+        if _has_usable_audio_backend(media):
+            return media
+
+        logger.info("Reachy media manager has no audio backend; opening local GStreamer audio only.")
+        try:
+            from reachy_mini.media.audio_gstreamer import GStreamerAudio
+        except ImportError as exc:
+            raise AudioInterfaceUnavailableError("Reachy GStreamer audio backend is not available.") from exc
+
+        return GStreamerAudio(log_level=logging.getLevelName(logger.getEffectiveLevel()))
 
 
 class ReachyElevenTools:
@@ -512,6 +542,53 @@ def _valid_sample_rate(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return sample_rate if sample_rate > 0 else default
+
+
+def _has_audio_backend_methods(value: Any) -> bool:
+    required_methods = (
+        "start_recording",
+        "stop_recording",
+        "get_audio_sample",
+        "get_input_audio_samplerate",
+        "start_playing",
+        "stop_playing",
+        "push_audio_sample",
+        "get_output_audio_samplerate",
+    )
+    return all(callable(getattr(value, method, None)) for method in required_methods)
+
+
+def _has_usable_audio_backend(value: Any) -> bool:
+    if not _has_audio_backend_methods(value):
+        return False
+
+    # MediaManager keeps audio-shaped forwarding methods even with NO_MEDIA, but
+    # those methods only log warnings and return None when `audio` is not set.
+    if hasattr(value, "audio") and getattr(value, "audio") is None:
+        return False
+
+    return True
+
+
+def _get_output_channels(audio_backend: Any) -> int:
+    try:
+        channels = int(audio_backend.get_output_channels())
+    except Exception:
+        return 1
+    return max(1, channels)
+
+
+def _fit_output_channels(audio_frame: NDArray[np.float32], output_channels: int) -> NDArray[np.float32]:
+    if output_channels <= 1:
+        return audio_frame.astype(np.float32, copy=False)
+    if audio_frame.ndim == 1:
+        return np.column_stack((audio_frame,) * output_channels).astype(np.float32, copy=False)
+    if audio_frame.ndim == 2 and audio_frame.shape[1] == output_channels:
+        return audio_frame.astype(np.float32, copy=False)
+    if audio_frame.ndim == 2 and audio_frame.shape[1] > output_channels:
+        return audio_frame[:, :output_channels].astype(np.float32, copy=False)
+    mono = _audio_frame_to_mono_float(audio_frame)
+    return np.column_stack((mono,) * output_channels).astype(np.float32, copy=False)
 
 
 def _float_audio_to_pcm16_bytes(

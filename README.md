@@ -81,6 +81,10 @@ export UV_LINK_MODE=copy
 uv sync --dev
 ```
 
+This environment includes `reachy-mini[wireless-version]` so the same uv
+environment can launch `reachy-mini-daemon --wireless-version` on wireless
+Reachy Mini robots.
+
 Create your local environment file:
 
 ```bash
@@ -94,6 +98,7 @@ REACHY_AGENT_PROVIDER=elevenlabs
 ELEVENLABS_AGENT_ID=agent_your_public_agent_id
 REACHY_ELEVEN_KEEPALIVE_INTERVAL_S=20
 REACHY_ELEVEN_RECONNECT_DELAY_S=2
+REACHY_ELEVEN_MEDIA_BACKEND=no_media
 ```
 
 For a private ElevenLabs agent, also set:
@@ -393,9 +398,48 @@ Use reachy_sleep only when the user asks you to sleep, rest, or shut down.
 Use reachy_wake only when the user asks you to wake up or resume.
 ```
 
-## Run Locally
+## Development And Robot Deployment
 
-Start the Reachy Mini daemon first, then run:
+Most developers should edit and test packaging from a workstation, then
+synchronize the repository to the Reachy Mini and run the live app on the robot.
+This matters because the ElevenLabs provider uses the local machine's audio
+pipeline. If you run `reachy-eleven-agent` on your workstation, it will use the
+workstation microphone and speaker, not Reachy's onboard audio.
+
+A typical workflow is:
+
+1. Develop on your workstation.
+2. Run local checks:
+
+```bash
+uv sync --dev
+uv run pytest tests/test_elevenlabs_agent.py tests/test_moves.py -q
+uv run reachy-mini-app-assistant check .
+```
+
+3. Synchronize the repository to the Reachy Mini with your normal deployment
+   method, such as `git pull` on the robot or `rsync` from your workstation.
+4. SSH into the robot and run the daemon/app commands there.
+
+The Reachy Mini daemon also runs on the robot. Restart it on the robot, not on
+your development workstation:
+
+```bash
+ssh pollen@<reachy-mini-host-or-ip>
+pkill -f reachy-mini-daemon
+uv run reachy-mini-daemon --wireless-version --no-media
+```
+
+If your robot uses a custom robot name, pass the same name to both commands:
+
+```bash
+uv run reachy-mini-daemon --wireless-version --no-media --robot-name <robot-name>
+uv run reachy-eleven-agent --robot-name <robot-name>
+```
+
+## Run On Reachy Mini
+
+On the robot, start the Reachy Mini daemon first, then run:
 
 ```bash
 uv run reachy-eleven-agent
@@ -461,9 +505,16 @@ uv run reachy-mini-app-assistant check .
 - No microphone or speaker audio: confirm `reachy-mini-daemon` is running, the app
   is connected to the expected robot, and the daemon's media backend can record
   and play audio.
+- `v4l2h264dec0: Too old frames`: the app is opening a video decoder. For the
+  ElevenLabs provider, keep `REACHY_ELEVEN_MEDIA_BACKEND=no_media` so the app
+  opens only the local audio pipeline.
 - `OSError: [Errno -9985] Device unavailable`: update to the current code. Older
   revisions used the ElevenLabs SDK PyAudio adapter, which opens host audio
   devices instead of Reachy's media stream.
+- `Failed to set robot target: Lost connection with the server`: the app lost
+  its control connection to `reachy-mini-daemon`. The current app stops the
+  conversation and pauses movement commands when this happens; restart the daemon
+  if it does not recover.
 - Robot keeps moving but no longer responds to voice: the motion loop may still
   be running after the ElevenLabs websocket ended. The app sends keepalives and
   automatically reconnects; check logs for `ElevenLabs conversation ended` and

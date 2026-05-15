@@ -11,6 +11,7 @@ from reachy_eleven_agent.elevenlabs_agent import (
     ReachyElevenTools,
     ElevenLabsAgentSettings,
     ReachyMediaAudioInterface,
+    _has_usable_audio_backend,
     _float_audio_to_pcm16_bytes,
     _pcm16_bytes_to_float_audio,
 )
@@ -44,6 +45,9 @@ class FakeMedia:
     def get_output_audio_samplerate(self) -> int:
         return 16000
 
+    def get_output_channels(self) -> int:
+        return 1
+
     def get_audio_sample(self):
         if self.samples:
             return self.samples.pop(0)
@@ -51,6 +55,10 @@ class FakeMedia:
 
     def push_audio_sample(self, audio_frame) -> None:
         self.pushed.append(audio_frame)
+
+
+class FakeNoMediaManager(FakeMedia):
+    audio = None
 
 
 class FakeMovementManager:
@@ -192,3 +200,8 @@ def test_audio_conversion_resamples_and_mixes_to_mono():
     assert len(pcm) == 800 * 2
     assert restored.shape == (1600,)
     np.testing.assert_allclose(restored, np.zeros(1600, dtype=np.float32), atol=1e-4)
+
+
+def test_no_media_manager_is_not_selected_as_audio_backend():
+    assert _has_usable_audio_backend(FakeNoMediaManager()) is False
+    assert _has_usable_audio_backend(FakeMedia()) is True

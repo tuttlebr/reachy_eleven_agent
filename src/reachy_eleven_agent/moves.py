@@ -36,7 +36,7 @@ import time
 import logging
 import threading
 from queue import Empty, Queue
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Callable
 from collections import deque
 from dataclasses import dataclass
 
@@ -165,6 +165,10 @@ def clone_full_body_pose(pose: FullBodyPose) -> FullBodyPose:
     return (head.copy(), (float(antennas[0]), float(antennas[1])), float(body_yaw))
 
 
+def _is_connection_lost_error(error: BaseException) -> bool:
+    return isinstance(error, ConnectionError) or "Lost connection with the server" in str(error)
+
+
 @dataclass
 class MovementState:
     """State tracking for the movement system."""
@@ -245,10 +249,12 @@ class MovementManager:
         self,
         current_robot: ReachyMini,
         camera_worker: "Any" = None,
+        on_connection_lost: Callable[[BaseException], None] | None = None,
     ):
         """Initialize movement manager."""
         self.current_robot = current_robot
         self.camera_worker = camera_worker
+        self._on_connection_lost = on_connection_lost
 
         # Single timing source for durations
         self._now = time.monotonic
@@ -282,6 +288,7 @@ class MovementManager:
         self._last_set_target_err = 0.0
         self._set_target_err_interval = 1.0  # seconds between error logs
         self._set_target_err_suppressed = 0
+        self._connection_lost = False
 
         # Cross-thread signalling
         self._command_queue: "Queue[Tuple[str, Any]]" = Queue()
@@ -655,9 +662,16 @@ class MovementManager:
 
     def _issue_control_command(self, head: NDArray[np.float32], antennas: Tuple[float, float], body_yaw: float) -> None:
         """Send the fused pose to the robot with throttled error logging."""
+        if self._connection_lost:
+            return
+
         try:
             self.current_robot.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
         except Exception as e:
+            if _is_connection_lost_error(e):
+                self._handle_connection_lost(e)
+                return
+
             now = self._now()
             if now - self._last_set_target_err >= self._set_target_err_interval:
                 msg = f"Failed to set robot target: {e}"
@@ -671,6 +685,26 @@ class MovementManager:
         else:
             with self._status_lock:
                 self._last_commanded_pose = clone_full_body_pose((head, antennas, body_yaw))
+
+    def _handle_connection_lost(self, error: BaseException) -> None:
+        if self._connection_lost:
+            return
+
+        self._connection_lost = True
+        self._control_paused = True
+        self.move_queue.clear()
+        self.state.current_move = None
+        self.state.move_start_time = None
+        self.state.speech_offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.state.face_tracking_offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self._breathing_active = False
+
+        logger.error("Lost connection to Reachy Mini daemon; pausing movement loop: %s", error)
+        if self._on_connection_lost is not None:
+            try:
+                self._on_connection_lost(error)
+            except Exception:
+                logger.debug("Connection-lost callback failed", exc_info=True)
 
     def _update_frequency_stats(
         self, loop_start: float, prev_loop_start: float, stats: LoopFrequencyStats,
@@ -765,6 +799,10 @@ class MovementManager:
         logger.debug("Move worker stopped")
 
         # Reset to neutral position using goto_target (same approach as wake_up)
+        if self._connection_lost:
+            logger.warning("Skipping neutral reset because the Reachy Mini connection is lost.")
+            return
+
         try:
             neutral_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
             neutral_antennas = [0.0, 0.0]
@@ -803,6 +841,7 @@ class MovementManager:
         return {
             "queue_size": len(self.move_queue),
             "control_paused": self._control_paused,
+            "connection_lost": self._connection_lost,
             "is_listening": self._is_listening,
             "breathing_active": self._breathing_active,
             "last_commanded_pose": {
