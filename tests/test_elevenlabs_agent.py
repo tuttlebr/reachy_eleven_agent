@@ -1,13 +1,56 @@
 from __future__ import annotations
-
+# ruff: noqa: D101,D102,D103,D107
 import argparse
+import threading
 
+import numpy as np
 import pytest
 
 from reachy_mini.utils import create_head_pose
-
+from reachy_eleven_agent.elevenlabs_agent import (
+    ReachyElevenTools,
+    ElevenLabsAgentSettings,
+    ReachyMediaAudioInterface,
+    _float_audio_to_pcm16_bytes,
+    _pcm16_bytes_to_float_audio,
+)
 from reachy_eleven_agent.tools.core_tools import ToolDependencies
-from reachy_eleven_agent.elevenlabs_agent import ElevenLabsAgentSettings, ReachyElevenTools
+
+
+class FakeMedia:
+    def __init__(self) -> None:
+        self.samples = []
+        self.pushed = []
+        self.recording_started = 0
+        self.playing_started = 0
+        self.recording_stopped = 0
+        self.playing_stopped = 0
+
+    def start_recording(self) -> None:
+        self.recording_started += 1
+
+    def start_playing(self) -> None:
+        self.playing_started += 1
+
+    def stop_recording(self) -> None:
+        self.recording_stopped += 1
+
+    def stop_playing(self) -> None:
+        self.playing_stopped += 1
+
+    def get_input_audio_samplerate(self) -> int:
+        return 16000
+
+    def get_output_audio_samplerate(self) -> int:
+        return 16000
+
+    def get_audio_sample(self):
+        if self.samples:
+            return self.samples.pop(0)
+        return None
+
+    def push_audio_sample(self, audio_frame) -> None:
+        self.pushed.append(audio_frame)
 
 
 class FakeMovementManager:
@@ -41,6 +84,7 @@ class FakeRobot:
     def __init__(self) -> None:
         self.sleep_calls = 0
         self.wake_calls = 0
+        self.media = FakeMedia()
 
     def get_current_head_pose(self):
         return create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
@@ -94,3 +138,57 @@ def test_sleep_pauses_movement_loop(tool_context):
     assert movement.paused is True
     assert movement.speech_offsets == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     assert robot.sleep_calls == 1
+
+
+def test_reachy_media_audio_converts_output_to_float_audio():
+    robot = FakeRobot()
+    audio = np.array([0, 32767, -32768], dtype=np.int16).tobytes()
+    interface = ReachyMediaAudioInterface(robot, head_wobbler=None)
+
+    interface.output(audio)
+
+    assert len(robot.media.pushed) == 1
+    np.testing.assert_allclose(
+        robot.media.pushed[0],
+        np.array([0.0, 32767 / 32768, -1.0], dtype=np.float32),
+        rtol=1e-6,
+    )
+
+
+def test_reachy_media_audio_stop_is_safe_from_input_callback():
+    robot = FakeRobot()
+    robot.media.samples.append(np.ones((160, 1), dtype=np.float32) * 0.25)
+    interface = ReachyMediaAudioInterface(robot, head_wobbler=None)
+    callback_called = threading.Event()
+    chunks = []
+
+    def callback(audio: bytes) -> None:
+        chunks.append(audio)
+        callback_called.set()
+        interface.stop()
+
+    interface.start(callback)
+
+    assert callback_called.wait(timeout=1.0)
+    interface.stop()
+    assert chunks
+    assert robot.media.recording_started == 1
+    assert robot.media.playing_started == 1
+    assert robot.media.recording_stopped >= 1
+    assert robot.media.playing_stopped >= 1
+
+
+def test_audio_conversion_resamples_and_mixes_to_mono():
+    stereo = np.column_stack(
+        [
+            np.linspace(-1.0, 1.0, num=1600, dtype=np.float32),
+            np.linspace(1.0, -1.0, num=1600, dtype=np.float32),
+        ]
+    )
+
+    pcm = _float_audio_to_pcm16_bytes(stereo, input_sample_rate=16000, output_sample_rate=8000)
+    restored = _pcm16_bytes_to_float_audio(pcm, input_sample_rate=8000, output_sample_rate=16000)
+
+    assert len(pcm) == 800 * 2
+    assert restored.shape == (1600,)
+    np.testing.assert_allclose(restored, np.zeros(1600, dtype=np.float32), atol=1e-4)

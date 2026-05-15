@@ -14,9 +14,9 @@ tags:
 
 Reachy Mini voice interaction app powered by ElevenLabs ElevenAgents.
 
-The app listens through the system default microphone, sends the conversation to
-an ElevenLabs agent, plays the agent response through the system default speaker,
-and taps that audio stream so Reachy moves while speaking. The app also exposes
+The app listens through Reachy Mini's media audio stream, sends the conversation
+to an ElevenLabs agent, plays the agent response through Reachy's speaker, and
+taps that audio stream so Reachy moves while speaking. The app also exposes
 client tools that let the ElevenLabs agent trigger simple Reachy gestures.
 
 ## Requirements
@@ -25,9 +25,7 @@ client tools that let the ElevenLabs agent trigger simple Reachy gestures.
 - Python 3.12.
 - `uv` for dependency management.
 - An ElevenLabs Conversational AI agent ID.
-- System audio devices configured for the microphone and speaker you want the app
-  to use.
-- PortAudio headers if you want live voice audio.
+- Reachy Mini media audio available through the daemon.
 
 ## Quick Start
 
@@ -35,7 +33,7 @@ From the repository root, which is the directory containing `pyproject.toml`:
 
 ```bash
 export UV_LINK_MODE=copy  # optional on mounted volumes where hardlinks are not supported
-uv sync --dev --extra audio
+uv sync --dev
 cp .env.example .env
 ```
 
@@ -64,14 +62,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
-Install PortAudio build dependencies before syncing the `audio` extra:
-
-```bash
-# Reachy OS
-sudo apt-get update
-sudo apt-get install -y build-essential python3-dev portaudio19-dev libasound2-dev
-```
-
 ## Setup
 
 Clone this repository, then work from the directory that contains
@@ -88,8 +78,7 @@ Create the synchronized environment:
 # Optional on mounted volumes where hardlinks are not supported.
 export UV_LINK_MODE=copy
 
-# Use --extra audio for live ElevenLabs microphone/speaker support.
-uv sync --dev --extra audio
+uv sync --dev
 ```
 
 Create your local environment file:
@@ -461,18 +450,20 @@ After pulling changes:
 
 ```bash
 git pull
-uv sync --dev --extra audio
+uv sync --dev
 uv run reachy-mini-app-assistant check .
 ```
 
 ## Troubleshooting
 
 - `ModuleNotFoundError: No module named 'reachy_mini'`: run commands with `uv run`
-  from the directory containing `pyproject.toml`, or rerun `uv sync --dev --extra audio`.
-- PyAudio or `portaudio.h` errors: install the PortAudio system packages listed in
-  Requirements, then rerun `uv sync --dev --extra audio`.
-- No microphone or speaker audio: verify the system default input/output device
-  before starting the app.
+  from the directory containing `pyproject.toml`, or rerun `uv sync --dev`.
+- No microphone or speaker audio: confirm `reachy-mini-daemon` is running, the app
+  is connected to the expected robot, and the daemon's media backend can record
+  and play audio.
+- `OSError: [Errno -9985] Device unavailable`: update to the current code. Older
+  revisions used the ElevenLabs SDK PyAudio adapter, which opens host audio
+  devices instead of Reachy's media stream.
 - Robot keeps moving but no longer responds to voice: the motion loop may still
   be running after the ElevenLabs websocket ended. The app sends keepalives and
   automatically reconnects; check logs for `ElevenLabs conversation ended` and

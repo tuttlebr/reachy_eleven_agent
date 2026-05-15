@@ -1,14 +1,13 @@
 """ElevenLabs ElevenAgents integration for Reachy Mini."""
 
 from __future__ import annotations
-
 import os
-import time
 import json
+import time
 import logging
 import threading
-from dataclasses import dataclass
 from typing import Any, Callable
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -17,7 +16,6 @@ from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
 from reachy_mini.motion.move import Move
 from reachy_mini.utils.interpolation import linear_pose_interpolation
-
 from reachy_eleven_agent.tools.core_tools import ToolDependencies
 from reachy_eleven_agent.audio.head_wobbler import HeadWobbler
 
@@ -25,6 +23,10 @@ from reachy_eleven_agent.audio.head_wobbler import HeadWobbler
 logger = logging.getLogger(__name__)
 
 ELEVENLABS_PCM_SAMPLE_RATE = 16000
+
+
+class AudioInterfaceUnavailableError(RuntimeError):
+    """Raised when Reachy's media audio cannot be started."""
 
 
 class ElevenGotoMove(Move):  # type: ignore[misc]
@@ -40,6 +42,7 @@ class ElevenGotoMove(Move):  # type: ignore[misc]
         start_body_yaw: float,
         duration: float,
     ) -> None:
+        """Initialize the move interpolation endpoints."""
         self.target_head_pose = target_head_pose
         self.start_head_pose = start_head_pose
         self.target_antennas = target_antennas
@@ -98,50 +101,172 @@ class ElevenLabsAgentSettings:
         )
 
 
-class TappedDefaultAudioInterface:
-    """Default ElevenLabs audio I/O with a tap for speech-synced robot motion."""
+class ReachyMediaAudioInterface:
+    """ElevenLabs audio I/O backed by Reachy Mini media streams."""
 
-    def __init__(self, head_wobbler: HeadWobbler | None, speech_motion_enabled: bool = True) -> None:
-        try:
-            from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
-
-            self._delegate = DefaultAudioInterface()
-        except ImportError as exc:
-            raise RuntimeError(
-                "ElevenLabs live audio needs PyAudio. Install system PortAudio headers first "
-                "(Debian/Ubuntu: sudo apt-get install portaudio19-dev libasound-dev), "
-                "then install pyaudio or elevenlabs[pyaudio]."
-            ) from exc
-
+    def __init__(
+        self,
+        reachy_mini: ReachyMini,
+        head_wobbler: HeadWobbler | None,
+        speech_motion_enabled: bool = True,
+    ) -> None:
+        """Initialize the Reachy media-backed audio adapter."""
+        self._reachy_mini = reachy_mini
+        self._media = reachy_mini.media
         self._head_wobbler = head_wobbler
         self._speech_motion_enabled = speech_motion_enabled
+        self._input_callback: Callable[[bytes], None] | None = None
+        self._input_sample_rate = ELEVENLABS_PCM_SAMPLE_RATE
+        self._output_sample_rate = ELEVENLABS_PCM_SAMPLE_RATE
+        self._stop_event = threading.Event()
+        self._record_thread: threading.Thread | None = None
+        self._lock = threading.RLock()
 
     def start(self, input_callback: Callable[[bytes], None]) -> None:
-        """Start microphone input and speaker output."""
-        self._delegate.start(input_callback)
+        """Start Reachy microphone input and speaker output."""
+        with self._lock:
+            if self._record_thread is not None and self._record_thread.is_alive():
+                logger.debug("Reachy media audio interface already running")
+                return
+
+            self._input_callback = input_callback
+            self._stop_event.clear()
+
+            try:
+                self._media.start_recording()
+                self._media.start_playing()
+                self._input_sample_rate = _valid_sample_rate(
+                    self._media.get_input_audio_samplerate(),
+                    ELEVENLABS_PCM_SAMPLE_RATE,
+                )
+                self._output_sample_rate = _valid_sample_rate(
+                    self._media.get_output_audio_samplerate(),
+                    ELEVENLABS_PCM_SAMPLE_RATE,
+                )
+            except Exception as exc:
+                self._stop_media()
+                raise AudioInterfaceUnavailableError(
+                    "Could not start Reachy media audio. Confirm reachy-mini-daemon is running "
+                    "and the robot audio backend is available."
+                ) from exc
+
+            self._record_thread = threading.Thread(
+                target=self._record_loop,
+                name="reachy-eleven-audio-input",
+                daemon=True,
+            )
+            self._record_thread.start()
 
     def stop(self) -> None:
-        """Stop microphone input and speaker output."""
-        self._delegate.stop()
+        """Stop Reachy microphone input and speaker output."""
+        record_thread: threading.Thread | None
+        with self._lock:
+            self._stop_event.set()
+            record_thread = self._record_thread
+
+        if (
+            record_thread is not None
+            and record_thread.is_alive()
+            and record_thread is not threading.current_thread()
+        ):
+            record_thread.join(timeout=2.0)
+
+        with self._lock:
+            self._record_thread = None
+            self._input_callback = None
+            self._stop_media()
+
+        if self._head_wobbler is not None:
+            self._head_wobbler.reset()
 
     def output(self, audio: bytes) -> None:
-        """Play agent audio and feed a copy into the head wobbler."""
-        if self._speech_motion_enabled and self._head_wobbler is not None and audio:
-            pcm = np.frombuffer(audio, dtype=np.int16).reshape(1, -1)
-            self._head_wobbler.feed_pcm(pcm, ELEVENLABS_PCM_SAMPLE_RATE)
-        self._delegate.output(audio)
+        """Play agent audio through Reachy and feed a copy into the head wobbler."""
+        if not audio:
+            return
+
+        pcm = np.frombuffer(audio, dtype=np.int16)
+        if self._speech_motion_enabled and self._head_wobbler is not None and pcm.size:
+            self._head_wobbler.feed_pcm(pcm.reshape(1, -1), ELEVENLABS_PCM_SAMPLE_RATE)
+
+        audio_frame = _pcm16_bytes_to_float_audio(
+            audio,
+            input_sample_rate=ELEVENLABS_PCM_SAMPLE_RATE,
+            output_sample_rate=self._output_sample_rate,
+        )
+        try:
+            self._media.push_audio_sample(audio_frame)
+        except Exception:
+            logger.warning("Failed to play ElevenLabs audio through Reachy media", exc_info=True)
 
     def interrupt(self) -> None:
         """Clear pending output and speech motion when the user interrupts."""
         if self._head_wobbler is not None:
             self._head_wobbler.reset()
-        self._delegate.interrupt()
+        self._clear_media_output()
+
+    def _record_loop(self) -> None:
+        """Read Reachy microphone samples and send ElevenLabs PCM chunks."""
+        while not self._stop_event.is_set():
+            try:
+                audio_frame = self._media.get_audio_sample()
+            except Exception:
+                if not self._stop_event.is_set():
+                    logger.warning("Failed to read Reachy microphone audio", exc_info=True)
+                    time.sleep(0.1)
+                continue
+
+            if audio_frame is None:
+                time.sleep(0.005)
+                continue
+
+            try:
+                pcm_bytes = _float_audio_to_pcm16_bytes(
+                    audio_frame,
+                    input_sample_rate=self._input_sample_rate,
+                    output_sample_rate=ELEVENLABS_PCM_SAMPLE_RATE,
+                )
+            except Exception:
+                logger.warning("Failed to convert Reachy microphone audio", exc_info=True)
+                continue
+
+            callback = self._input_callback
+            if callback is None or not pcm_bytes:
+                continue
+
+            try:
+                callback(pcm_bytes)
+            except Exception:
+                logger.warning("ElevenLabs input callback failed; stopping audio capture", exc_info=True)
+                self._stop_event.set()
+
+    def _stop_media(self) -> None:
+        try:
+            self._media.stop_recording()
+        except Exception:
+            logger.debug("Error stopping Reachy audio recording", exc_info=True)
+
+        try:
+            self._media.stop_playing()
+        except Exception:
+            logger.debug("Error stopping Reachy audio playback", exc_info=True)
+
+    def _clear_media_output(self) -> None:
+        try:
+            from reachy_mini.media.media_manager import MediaBackend
+
+            if self._media.backend in {MediaBackend.GSTREAMER, MediaBackend.GSTREAMER_NO_VIDEO}:
+                self._media.audio.clear_player()
+            else:
+                self._media.audio.clear_output_buffer()
+        except Exception:
+            logger.debug("Could not clear Reachy audio output buffer", exc_info=True)
 
 
 class ReachyElevenTools:
     """Client tools exposed to the ElevenLabs agent."""
 
     def __init__(self, deps: ToolDependencies) -> None:
+        """Initialize the tool registry with shared app dependencies."""
         self.deps = deps
 
     def register_with(self, client_tools: Any) -> None:
@@ -300,7 +425,7 @@ def run_elevenlabs_agent(
 ) -> None:
     """Run the ElevenLabs conversation until stopped."""
     from elevenlabs.client import ElevenLabs
-    from elevenlabs.conversational_ai.conversation import Conversation, ClientTools
+    from elevenlabs.conversational_ai.conversation import ClientTools, Conversation
 
     settings = ElevenLabsAgentSettings.from_args(args)
     client = ElevenLabs(api_key=settings.api_key)
@@ -310,7 +435,8 @@ def run_elevenlabs_agent(
         client_tools = ClientTools()
         ReachyElevenTools(deps).register_with(client_tools)
 
-        audio_interface = TappedDefaultAudioInterface(
+        audio_interface = ReachyMediaAudioInterface(
+            reachy_mini=deps.reachy_mini,
             head_wobbler=deps.head_wobbler,
             speech_motion_enabled=settings.speech_motion_enabled,
         )
@@ -378,6 +504,76 @@ def run_elevenlabs_agent(
         delay = max(0.0, settings.reconnect_delay_s)
         logger.warning("Restarting ElevenLabs conversation in %.1fs", delay)
         time.sleep(delay)
+
+
+def _valid_sample_rate(value: Any, default: int) -> int:
+    try:
+        sample_rate = int(value)
+    except (TypeError, ValueError):
+        return default
+    return sample_rate if sample_rate > 0 else default
+
+
+def _float_audio_to_pcm16_bytes(
+    audio_frame: bytes | NDArray[np.float32],
+    *,
+    input_sample_rate: int,
+    output_sample_rate: int,
+) -> bytes:
+    if isinstance(audio_frame, bytes):
+        pcm = np.frombuffer(audio_frame, dtype=np.int16)
+        if input_sample_rate != output_sample_rate:
+            pcm_float = pcm.astype(np.float32) / 32768.0
+            pcm_float = _resample_linear(pcm_float, input_sample_rate, output_sample_rate)
+            pcm = np.clip(pcm_float * 32767.0, -32768, 32767).astype(np.int16)
+        return pcm.tobytes()
+
+    mono = _audio_frame_to_mono_float(audio_frame)
+    if input_sample_rate != output_sample_rate:
+        mono = _resample_linear(mono, input_sample_rate, output_sample_rate)
+    pcm = np.clip(mono, -1.0, 1.0)
+    return (pcm * 32767.0).astype(np.int16).tobytes()
+
+
+def _pcm16_bytes_to_float_audio(
+    audio: bytes,
+    *,
+    input_sample_rate: int,
+    output_sample_rate: int,
+) -> NDArray[np.float32]:
+    pcm = np.frombuffer(audio, dtype=np.int16)
+    audio_frame = pcm.astype(np.float32) / 32768.0
+    if input_sample_rate != output_sample_rate:
+        audio_frame = _resample_linear(audio_frame, input_sample_rate, output_sample_rate)
+    return audio_frame.astype(np.float32, copy=False)
+
+
+def _audio_frame_to_mono_float(audio_frame: NDArray[np.float32]) -> NDArray[np.float32]:
+    frame = np.asarray(audio_frame, dtype=np.float32)
+    if frame.ndim == 0:
+        return np.empty(0, dtype=np.float32)
+    if frame.ndim == 1:
+        return frame
+    if frame.ndim > 2:
+        frame = frame.reshape(frame.shape[0], -1)
+    if frame.ndim == 2 and frame.shape[1] > frame.shape[0]:
+        frame = frame.T
+    return frame.mean(axis=1)
+
+
+def _resample_linear(audio_frame: NDArray[np.float32], input_sample_rate: int, output_sample_rate: int) -> NDArray[np.float32]:
+    if input_sample_rate <= 0 or output_sample_rate <= 0 or input_sample_rate == output_sample_rate:
+        return audio_frame.astype(np.float32, copy=False)
+    if audio_frame.size == 0:
+        return audio_frame.astype(np.float32, copy=False)
+
+    output_length = max(1, int(round(audio_frame.size * output_sample_rate / input_sample_rate)))
+    if output_length == audio_frame.size:
+        return audio_frame.astype(np.float32, copy=False)
+
+    source = np.linspace(0.0, 1.0, num=audio_frame.size, endpoint=False)
+    target = np.linspace(0.0, 1.0, num=output_length, endpoint=False)
+    return np.interp(target, source, audio_frame).astype(np.float32)
 
 
 def _float_env(name: str, default: float) -> float:
