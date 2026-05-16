@@ -469,15 +469,21 @@ def mount_elevenlabs_dashboard(settings_app: Any, runtime: ElevenLabsDashboardRu
                     stop_button = gr.Button("Stop", variant="stop")
                 restart_button = gr.Button("Restart conversation")
 
-        dashboard.load(load_values, outputs=[agent_id, api_key, user_id, clear_api_key, status_box])
+        dashboard.load(
+            load_values,
+            outputs=[agent_id, api_key, user_id, clear_api_key, status_box],
+            queue=False,
+            show_progress="hidden",
+        )
         save_button.click(
             save,
             inputs=[agent_id, api_key, user_id, clear_api_key],
             outputs=[agent_id, api_key, user_id, clear_api_key, status_box],
+            queue=False,
         )
-        start_button.click(start, outputs=[status_box])
-        stop_button.click(stop, outputs=[status_box])
-        restart_button.click(restart, outputs=[status_box])
-        refresh_button.click(refresh, outputs=[status_box])
+        start_button.click(start, outputs=[status_box], queue=False)
+        stop_button.click(stop, outputs=[status_box], queue=False)
+        restart_button.click(restart, outputs=[status_box], queue=False)
+        refresh_button.click(refresh, outputs=[status_box], queue=False)
 
     gr.mount_gradio_app(settings_app, dashboard, path="/")
