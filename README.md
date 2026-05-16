@@ -81,9 +81,9 @@ export UV_LINK_MODE=copy
 uv sync --dev
 ```
 
-This environment includes `reachy-mini[wireless-version]` so the same uv
-environment can launch `reachy-mini-daemon --wireless-version` on wireless
-Reachy Mini robots.
+This environment pins `reachy-mini[wireless-version]==1.7.1` so the SDK and
+`reachy-mini-daemon` stay aligned. Launch both the daemon and the app with
+`uv run` from this repository so they use the same locked package version.
 
 Create your local environment file:
 
@@ -98,6 +98,8 @@ REACHY_AGENT_PROVIDER=elevenlabs
 ELEVENLABS_AGENT_ID=agent_your_public_agent_id
 REACHY_ELEVEN_KEEPALIVE_INTERVAL_S=20
 REACHY_ELEVEN_RECONNECT_DELAY_S=2
+REACHY_ELEVEN_ROBOT_RECONNECT_DELAY_S=2
+REACHY_ELEVEN_ROBOT_RECONNECT_MAX_DELAY_S=30
 REACHY_ELEVEN_MEDIA_BACKEND=no_media
 ```
 
@@ -430,6 +432,12 @@ pkill -f reachy-mini-daemon
 uv run reachy-mini-daemon --wireless-version --no-media
 ```
 
+Confirm the app environment is using the pinned SDK/daemon package:
+
+```bash
+uv run python -c "import reachy_mini; print(reachy_mini.__version__)"
+```
+
 If your robot uses a custom robot name, pass the same name to both commands:
 
 ```bash
@@ -512,9 +520,14 @@ uv run reachy-mini-app-assistant check .
   revisions used the ElevenLabs SDK PyAudio adapter, which opens host audio
   devices instead of Reachy's media stream.
 - `Failed to set robot target: Lost connection with the server`: the app lost
-  its control connection to `reachy-mini-daemon`. The current app stops the
-  conversation and pauses movement commands when this happens; restart the daemon
-  if it does not recover.
+  its control connection to `reachy-mini-daemon`. In ElevenLabs mode the voice
+  app stays alive and reconnects the Reachy Mini SDK websocket in the background;
+  check logs for `Attempting Reachy Mini daemon reconnect` and `Reconnected to
+  Reachy Mini daemon`.
+- `Reachy Mini SDK and daemon versions do not match`: restart the daemon with
+  `uv run reachy-mini-daemon --wireless-version --no-media` from this repository,
+  then restart `uv run reachy-eleven-agent`. Both commands should use
+  `reachy-mini==1.7.1`.
 - Robot keeps moving but no longer responds to voice: the motion loop may still
   be running after the ElevenLabs websocket ended. The app sends keepalives and
   automatically reconnects; check logs for `ElevenLabs conversation ended` and

@@ -388,6 +388,14 @@ class MovementManager:
         """
         self._command_queue.put(("set_control_paused", paused))
 
+    def replace_robot(self, current_robot: ReachyMini) -> None:
+        """Swap in a fresh ReachyMini SDK connection and resume output.
+
+        The worker thread applies the replacement so all movement state changes
+        stay serialized with the 100 Hz control loop.
+        """
+        self._command_queue.put(("replace_robot", current_robot))
+
     def _poll_signals(self, current_time: float) -> None:
         """Apply queued commands and pending offset updates."""
         self._apply_pending_offsets()
@@ -489,6 +497,39 @@ class MovementManager:
                 self.state.speech_offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                 self._breathing_active = False
             self.state.update_activity()
+        elif command == "replace_robot":
+            self.current_robot = payload
+            self._connection_lost = False
+            self._control_paused = False
+            self.move_queue.clear()
+            self.state.current_move = None
+            self.state.move_start_time = None
+            self.state.speech_offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            self.state.face_tracking_offsets = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            self._breathing_active = False
+            self._set_target_err_suppressed = 0
+            self._last_set_target_err = 0.0
+
+            try:
+                _, current_antennas = self.current_robot.get_current_joint_positions()
+                current_head_pose = self.current_robot.get_current_head_pose()
+                restored_pose = (
+                    current_head_pose.copy(),
+                    (float(current_antennas[0]), float(current_antennas[1])),
+                    0.0,
+                )
+            except Exception:
+                logger.debug("Could not snapshot pose after reconnect; resuming from neutral", exc_info=True)
+                neutral_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
+                restored_pose = (neutral_pose, (0.0, 0.0), 0.0)
+
+            self.state.last_primary_pose = clone_full_body_pose(restored_pose)
+            with self._status_lock:
+                self._last_commanded_pose = clone_full_body_pose(restored_pose)
+            self._listening_antennas = restored_pose[1]
+            self._antenna_unfreeze_blend = 1.0
+            self.state.update_activity()
+            logger.info("Movement manager resumed with a fresh Reachy Mini connection")
         else:
             logger.warning("Unknown command received by MovementManager: %s", command)
 

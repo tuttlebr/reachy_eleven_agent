@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import asyncio
+import logging
 import argparse
 import threading
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,37 @@ def update_chatbot(chatbot: List[Dict[str, Any]], response: Dict[str, Any]) -> L
     """Update the chatbot with AdditionalOutputs."""
     chatbot.append(response)
     return chatbot
+
+
+def _robot_kwargs_from_args(args: argparse.Namespace) -> Dict[str, Any]:
+    """Build ReachyMini constructor kwargs from app arguments."""
+    robot_kwargs: Dict[str, Any] = {}
+    if args.robot_name is not None:
+        robot_kwargs["robot_name"] = args.robot_name
+
+    if args.provider == "elevenlabs":
+        robot_kwargs["media_backend"] = os.getenv("REACHY_ELEVEN_MEDIA_BACKEND", "no_media")
+
+    return robot_kwargs
+
+
+def _close_robot_connection(robot: ReachyMini, logger: logging.Logger) -> None:
+    """Best-effort cleanup for an SDK connection."""
+    try:
+        robot.media.close()
+    except Exception as e:
+        logger.debug("Error closing media during shutdown: %s", e)
+
+    try:
+        if getattr(robot, "_media_released", False):
+            robot.client.acquire_media()
+    except Exception as e:
+        logger.debug("Error returning media to daemon during shutdown: %s", e)
+
+    try:
+        robot.client.disconnect()
+    except Exception as e:
+        logger.debug("Error disconnecting Reachy Mini client: %s", e)
 
 
 def main() -> None:
@@ -52,15 +84,10 @@ def run(
             "Remove --no-camera to enable head tracking."
         )
 
+    robot_kwargs = _robot_kwargs_from_args(args)
+
     if robot is None:
         try:
-            robot_kwargs = {}
-            if args.robot_name is not None:
-                robot_kwargs["robot_name"] = args.robot_name
-
-            if args.provider == "elevenlabs":
-                robot_kwargs["media_backend"] = os.getenv("REACHY_ELEVEN_MEDIA_BACKEND", "no_media")
-
             logger.info("Initializing ReachyMini with options: %s", robot_kwargs)
             robot = ReachyMini(**robot_kwargs)
 
@@ -107,15 +134,82 @@ def run(
         args.no_camera = True
 
     camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
+    robot_ref = {"robot": robot}
+    reconnect_lock = threading.Lock()
+    reconnect_thread: threading.Thread | None = None
 
     def stop_on_connection_lost(error: BaseException) -> None:
         logger.error("Lost connection to Reachy Mini daemon; stopping app. Details: %s", error)
         stop_event.set()
 
+    def reconnect_on_connection_lost(error: BaseException) -> None:
+        nonlocal reconnect_thread
+
+        logger.error(
+            "Lost connection to Reachy Mini daemon; keeping voice app alive and reconnecting. Details: %s",
+            error,
+        )
+
+        with reconnect_lock:
+            if reconnect_thread is not None and reconnect_thread.is_alive():
+                logger.debug("Reachy Mini reconnect already in progress")
+                return
+
+            reconnect_thread = threading.Thread(
+                target=reconnect_robot_loop,
+                name="reachy-mini-reconnect",
+                daemon=True,
+            )
+            reconnect_thread.start()
+
+    def reconnect_robot_loop() -> None:
+        nonlocal reconnect_thread
+
+        delay = max(0.5, float(os.getenv("REACHY_ELEVEN_ROBOT_RECONNECT_DELAY_S", "2.0")))
+        max_delay = max(delay, float(os.getenv("REACHY_ELEVEN_ROBOT_RECONNECT_MAX_DELAY_S", "30.0")))
+        attempt = 1
+
+        _close_robot_connection(robot_ref["robot"], logger)
+
+        while not stop_event.is_set():
+            try:
+                logger.warning("Attempting Reachy Mini daemon reconnect (attempt %d)", attempt)
+                new_robot = ReachyMini(**robot_kwargs)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(
+                    "Reachy Mini reconnect attempt %d failed: %s. Retrying in %.1fs",
+                    attempt,
+                    e,
+                    delay,
+                )
+            except Exception:
+                logger.warning(
+                    "Unexpected error during Reachy Mini reconnect attempt %d. Retrying in %.1fs",
+                    attempt,
+                    delay,
+                    exc_info=True,
+                )
+            else:
+                robot_ref["robot"] = new_robot
+                deps.reachy_mini = new_robot
+                movement_manager.replace_robot(new_robot)
+                if camera_worker is not None:
+                    camera_worker.reachy_mini = new_robot
+                logger.info("Reconnected to Reachy Mini daemon; app remains running")
+                break
+
+            attempt += 1
+            if stop_event.wait(delay):
+                break
+            delay = min(max_delay, delay * 1.5)
+
+        with reconnect_lock:
+            reconnect_thread = None
+
     movement_manager = MovementManager(
         current_robot=robot,
         camera_worker=camera_worker,
-        on_connection_lost=stop_on_connection_lost,
+        on_connection_lost=reconnect_on_connection_lost if args.provider == "elevenlabs" else stop_on_connection_lost,
     )
 
     head_wobbler = HeadWobbler(set_speech_offsets=movement_manager.set_speech_offsets)
@@ -141,22 +235,18 @@ def run(
         try:
             run_elevenlabs_agent(args, deps, stop_event=stop_event)
         finally:
+            stop_event.set()
             movement_manager.stop()
             head_wobbler.stop()
             if camera_worker:
                 camera_worker.stop()
             if vision_manager:
                 vision_manager.stop()
-            try:
-                robot.media.close()
-            except Exception as e:
-                logger.debug(f"Error closing media during shutdown: {e}")
-            try:
-                if getattr(robot, "_media_released", False):
-                    robot.client.acquire_media()
-            except Exception as e:
-                logger.debug(f"Error returning media to daemon during shutdown: {e}")
-            robot.client.disconnect()
+            with reconnect_lock:
+                thread_to_join = reconnect_thread
+            if thread_to_join is not None and thread_to_join.is_alive():
+                thread_to_join.join(timeout=5.0)
+            _close_robot_connection(robot_ref["robot"], logger)
             time.sleep(1)
             logger.info("Shutdown complete.")
         return
@@ -255,6 +345,7 @@ def run(
     except KeyboardInterrupt:
         logger.info("Keyboard interruption in main thread... closing server.")
     finally:
+        stop_event.set()
         movement_manager.stop()
         head_wobbler.stop()
         if camera_worker:
@@ -262,14 +353,8 @@ def run(
         if vision_manager:
             vision_manager.stop()
 
-        # Ensure media is explicitly closed before disconnecting
-        try:
-            robot.media.close()
-        except Exception as e:
-            logger.debug(f"Error closing media during shutdown: {e}")
-
         # prevent connection to keep alive some threads
-        robot.client.disconnect()
+        _close_robot_connection(robot_ref["robot"], logger)
         time.sleep(1)
         logger.info("Shutdown complete.")
 
