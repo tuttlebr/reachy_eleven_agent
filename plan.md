@@ -25,3 +25,4 @@ Build a Python Reachy Mini app that uses ElevenLabs ElevenAgents for live voice 
 - May 16 reconnect fix: if the Reachy Mini daemon websocket drops during ElevenLabs mode, keep the voice loop alive, reconnect the SDK client in the background, and resume the movement manager with the new client instead of stopping the app.
 - May 16 version alignment: pin `reachy-mini[wireless-version]==1.7.1` because the robot daemon reports version 1.7.1; run both daemon and app through this repo's `uv run` environment.
 - May 16 catalog readiness: dashboard launches now expose a Gradio settings/control UI for ElevenLabs agent ID, optional API key/user ID, and start/stop/restart controls.
+- May 16 dashboard route fix: remove the template static `GET /` route before mounting Gradio so startup shows the ElevenLabs controls, not the unused OpenAI key page.
