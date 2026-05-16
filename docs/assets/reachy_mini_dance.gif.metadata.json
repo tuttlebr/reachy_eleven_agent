@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0.0",
+  "source_path": "/volume2/daedalus/datasets/reachy_mini_daedalus/reachy_eleven_agent/reachy_eleven_agent/docs/assets/reachy_mini_dance.gif",
+  "file_sha256": "75914c3cb7af982e0b1c6369e25fc46d8c08a0ab5ad022240ae9c1a0d93967c3",
+  "file_size_bytes": 3930400,
+  "file_mtime_rfc3339": "2026-05-15T12:28:20.044827919Z",
+  "original_mime_type": "image/gif",
+  "width": 554,
+  "height": 312,
+  "processing_model": "Qwen/Qwen3.6-35B-A3B-FP8",
+  "model_version": "Qwen/Qwen3.6-35B-A3B-FP8",
+  "prompt_version": "2026-05-02.a",
+  "processed_at_rfc3339": "2026-05-15T23:20:08.558385558Z",
+  "processing_duration_ms": 5662,
+  "raw_response": "{\n  \"caption\": \"A white robot with antenna-like ears sits on a desk next to a person working on a laptop.\",\n  \"description\": \"A small, white, cylindrical robot with two black circular eyes and thin antenna-like ears sits on a white desk. To its right, a person is seated, facing away from the camera, working on a laptop computer. A modern white desk lamp stands between the robot and the laptop, and a grey chair is visible on the left side of the frame.\",\n  \"tags\": [\n    \"robot\",\n    \"technology\",\n    \"desk\",\n    \"laptop\",\n    \"computer\",\n    \"workspace\",\n    \"ai\",\n    \"artificial intelligence\",\n    \"white\",\n    \"modern\",\n    \"indoor\",\n    \"office\",\n    \"person\",\n    \"lamp\",\n    \"furniture\"\n  ],\n  \"scene\": \"A person working at a desk next to a small robot.\",\n  \"setting_type\": \"indoor\",\n  \"detected_text\": [],\n  \"dominant_colors\": [\n    \"white\",\n    \"grey\",\n    \"beige\",\n    \"black\"\n  ],\n  \"people\": [\n    {\n      \"count_estimate\": 1,\n      \"apparent_age_range\": \"adult\",\n      \"activity\": \"working on a laptop\"\n    }\n  ],\n  \"objects\": [\n    \"robot\",\n    \"laptop\",\n    \"desk\",\n    \"lamp\",\n    \"chair\",\n    \"keyboard\"\n  ],\n  \"quality\": {\n    \"sharpness\": \"slightly_soft\",\n    \"exposure\": \"balanced\",\n    \"composition\": \"The robot is in focus on the left, while the person and laptop are slightly out of focus on the right, creating depth.\",\n    \"overall_score\": 7\n  }\n}",
+  "content": {
+    "caption": "A white robot with antenna-like ears sits on a desk next to a person working on a laptop.",
+    "description": "A small, white, cylindrical robot with two black circular eyes and thin antenna-like ears sits on a white desk. To its right, a person is seated, facing away from the camera, working on a laptop computer. A modern white desk lamp stands between the robot and the laptop, and a grey chair is visible on the left side of the frame.",
+    "tags": [
+      "robot",
+      "technology",
+      "desk",
+      "laptop",
+      "computer",
+      "workspace",
+      "ai",
+      "artificial intelligence",
+      "white",
+      "modern",
+      "indoor",
+      "office",
+      "person",
+      "lamp",
+      "furniture"
+    ],
+    "scene": "A person working at a desk next to a small robot.",
+    "setting_type": "indoor",
+    "detected_text": [],
+    "dominant_colors": [
+      "white",
+      "grey",
+      "beige",
+      "black"
+    ],
+    "people": [
+      {
+        "count_estimate": 1,
+        "apparent_age_range": "adult",
+        "activity": "working on a laptop"
+      }
+    ],
+    "objects": [
+      "robot",
+      "laptop",
+      "desk",
+      "lamp",
+      "chair",
+      "keyboard"
+    ],
+    "quality": {
+      "sharpness": "slightly_soft",
+      "exposure": "balanced",
+      "composition": "The robot is in focus on the left, while the person and laptop are slightly out of focus on the right, creating depth.",
+      "overall_score": 7
+    }
+  }
+}
