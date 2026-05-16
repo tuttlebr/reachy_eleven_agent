@@ -138,6 +138,9 @@ def run(
     reconnect_lock = threading.Lock()
     reconnect_thread: threading.Thread | None = None
 
+    def should_stop_reconnect() -> bool:
+        return stop_event.is_set()
+
     def stop_on_connection_lost(error: BaseException) -> None:
         logger.error("Lost connection to Reachy Mini daemon; stopping app. Details: %s", error)
         stop_event.set()
@@ -171,7 +174,7 @@ def run(
 
         _close_robot_connection(robot_ref["robot"], logger)
 
-        while not stop_event.is_set():
+        while not should_stop_reconnect():
             try:
                 logger.warning("Attempting Reachy Mini daemon reconnect (attempt %d)", attempt)
                 new_robot = ReachyMini(**robot_kwargs)
@@ -224,6 +227,39 @@ def run(
 
     if args.provider == "elevenlabs":
         from reachy_eleven_agent.elevenlabs_agent import run_elevenlabs_agent
+
+        if settings_app is not None:
+            from reachy_eleven_agent.elevenlabs_dashboard import (
+                ElevenLabsDashboardRuntime,
+                mount_elevenlabs_dashboard,
+            )
+
+            dashboard_runtime = ElevenLabsDashboardRuntime(
+                args=args,
+                deps=deps,
+                movement_manager=movement_manager,
+                head_wobbler=head_wobbler,
+                camera_worker=camera_worker,
+                vision_manager=vision_manager,
+                app_stop_event=stop_event,
+                instance_path=instance_path,
+                conversation_runner=run_elevenlabs_agent,
+            )
+            mount_elevenlabs_dashboard(settings_app, dashboard_runtime)
+            logger.info("ElevenLabs dashboard controls are ready at %s", ReachyElevenAgent.custom_app_url)
+
+            try:
+                stop_event.wait()
+            finally:
+                dashboard_runtime.close()
+                with reconnect_lock:
+                    thread_to_join = reconnect_thread
+                if thread_to_join is not None and thread_to_join.is_alive():
+                    thread_to_join.join(timeout=5.0)
+                _close_robot_connection(robot_ref["robot"], logger)
+                time.sleep(1)
+                logger.info("Shutdown complete.")
+            return
 
         movement_manager.start()
         head_wobbler.start()
@@ -364,6 +400,7 @@ class ReachyElevenAgent(ReachyMiniApp):  # type: ignore[misc]
 
     custom_app_url = "http://0.0.0.0:7860/"
     dont_start_webserver = False
+    request_media_backend = "no_media"
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         """Run the Reachy Mini conversation app."""

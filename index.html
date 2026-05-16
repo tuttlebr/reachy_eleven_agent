@@ -12,7 +12,7 @@
       <header class="hero">
         <div class="pill">Reachy Mini App</div>
         <h1>Reachy Eleven Agent</h1>
-        <p class="subtitle">A conversation app for Reachy Mini robot.</p>
+        <p class="subtitle">An ElevenLabs voice app for Reachy Mini with dashboard setup and robot gestures.</p>
       </header>
 
       <div class="panel">
@@ -22,20 +22,20 @@
             <h2>Installation</h2>
           </div>
         </div>
-        <p class="muted">Install this app on your Reachy Mini using the app store, or run it locally:</p>
+        <p class="muted">Install this app from the Reachy Mini app catalog, open its settings page, enter your ElevenLabs agent ID, then start the conversation from the dashboard UI.</p>
         <pre><code>uv sync
 reachy-mini-daemon --sim  # in another terminal
-python -m reachy_eleven_agent</code></pre>
+uv run reachy-eleven-agent</code></pre>
       </div>
 
       <div class="panel">
         <div class="panel-heading">
           <div>
             <p class="eyebrow">Configuration</p>
-            <h2>OpenAI API Key</h2>
+            <h2>ElevenLabs Agent</h2>
           </div>
         </div>
-        <p class="muted">This app requires an OpenAI API key for voice conversations. Set it via the web interface or environment variable.</p>
+        <p class="muted">A public ElevenLabs agent only needs an agent ID. Private agents can also use an optional ElevenLabs API key, stored locally on the robot.</p>
       </div>
     </div>
   </body>

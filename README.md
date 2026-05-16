@@ -29,6 +29,20 @@ client tools that let the ElevenLabs agent trigger simple Reachy gestures.
 
 ## Quick Start
 
+### From the Reachy Mini dashboard
+
+1. Open the Reachy Mini dashboard.
+2. Install this Space from the app catalog.
+3. Click Play.
+4. Open the app settings page.
+5. Enter your ElevenLabs agent ID and optional API key.
+6. Click **Save settings**, then **Start**.
+
+The settings are saved locally for the app instance, so future launches can use
+the same ElevenLabs configuration without SSH.
+
+### Local development
+
 From the repository root, which is the directory containing `pyproject.toml`:
 
 ```bash
@@ -43,7 +57,8 @@ Edit `.env` and set:
 ELEVENLABS_AGENT_ID=agent_your_public_agent_id
 ```
 
-Start `reachy-mini-daemon`, then launch the app:
+Start `reachy-mini-daemon`, then launch the app. Direct CLI launches start the
+ElevenLabs conversation immediately from environment variables:
 
 ```bash
 uv run reachy-eleven-agent
@@ -447,7 +462,12 @@ uv run reachy-eleven-agent --robot-name <robot-name>
 
 ## Run On Reachy Mini
 
-On the robot, start the Reachy Mini daemon first, then run:
+When installed from the app catalog, start the app from the dashboard. The
+dashboard settings page lets you save the ElevenLabs agent ID, optional private
+agent API key, optional user ID, and start/stop the conversation.
+
+For SSH-based development on the robot, start the Reachy Mini daemon first, then
+run:
 
 ```bash
 uv run reachy-eleven-agent
@@ -471,6 +491,7 @@ uv run reachy-eleven-agent --provider openai --gradio
 Run the focused tests and Reachy app packaging check:
 
 ```bash
+uv run pytest tests/test_elevenlabs_dashboard.py -q
 uv run pytest tests/test_elevenlabs_agent.py -q
 uv run reachy-mini-app-assistant check .
 ```
